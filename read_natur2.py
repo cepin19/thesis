@@ -28,6 +28,7 @@ import sacremoses
 # import dataviz
 import seaborn as sns
 from sacremoses import MosesTokenizer, MosesDetokenizer
+from sklearn.model_selection import cross_val_score
 
 # Processing commandline arguments
 import argparse
@@ -56,6 +57,8 @@ parser.add_argument('--sent-seg', type=bool, default=False,
                     help='feed the sentences to LM one by one')
 parser.add_argument('--skip-first', type=bool,
                     help='skip first word in each sentence in the measurements')
+parser.add_argument('--cola', type=bool, default=False,
+                    help='eval cola')
 # If model set by user, use it instead of the desent-levelfault
 model_name="gpt2"
 outdir="results/"
@@ -88,10 +91,12 @@ def get_unigram_log_prob(text,unigram_mapping):
     tokens = [moses_detokenizer.detokenize([t.lower()]) for t in moses_tokenizer.tokenize(text)]
     tokens=[t for t in tokens if t not in string.punctuation]
     return np.sum([unigram_mapping.get(k, np.nan) for k in tokens])
-
+def string_to_uni_log_probs(sent):
+    words = [s.strip().strip(string.punctuation).lower() for s in sent.split()]
+    return [get_sentence_freq(w.strip().strip(string.punctuation)) for w in words]
 def get_sentence_freq(sen):
-    words = [moses_detokenizer([t]) for t in moses_tokenizer(sen)]
-    total = [get_unigram_log_prob(w.strip().strip(string.punctuation).lower()) for w in words]
+    words = [moses_detokenizer.detokenize([t]) for t in moses_tokenizer.tokenize(sen)]
+    total = [get_unigram_log_prob(w.strip().strip(string.punctuation).lower(),unigram_mapping) for w in words]
     return np.nansum(list(filter(lambda x: x != None, total)))
     pass
 def add_lau_accept_measures(df):
@@ -131,7 +136,6 @@ def read_ns(filename='naturalstories/naturalstories_RTS/processed_RTs_bkp.tsv'):
     df['computedmeanItemRT'] = df.groupby(['zone','item'])['RT'].transform('mean')
     df['logmeanItemRT'] = np.log(df['meanItemRT'])
     df['meanUnigramLogProb'] = df.groupby(['zone','item'])['unigram_log_prob'].transform('mean')
-
     sent_id=0
     for story in stories:
         zone=1
@@ -143,6 +147,7 @@ def read_ns(filename='naturalstories/naturalstories_RTS/processed_RTs_bkp.tsv'):
             sent_id+=1
             zone+=len(s.split(" "))
         item+=1
+    df['meanUnigramLogProb_times_len']=df['meanUnigramLogProb']*df['sent_len']
     return df
 
 def read_brown(filename='brown/data/corpora/brown_spr.csv'):
@@ -188,6 +193,7 @@ def read_brown(filename='brown/data/corpora/brown_spr.csv'):
             sent_id+=1
             zone+=len(s.split(" "))
         item+=1
+    df['meanUnigramLogProb_times_len']=df['meanUnigramLogProb']*df['sent_len']
     return df
 
 def get_surp_story(stories,df):
@@ -336,6 +342,42 @@ def get_surp_cola(sentences,df):
     df=add_lau_accept_measures(df)
     return df
 
+def get_surp_cola_new(sentences):
+    all_surps=[]
+    for i,s in enumerate(sentences):
+        s=s.replace('é','e')
+        words = s.split(" ")
+        orig_words = words.copy()
+        [surp] = m.surprise(s)
+        sent_surps=[]
+        curr_word_surp = [0.0]
+        curr_toks = ""
+        curr_word_ix = 0
+
+        for tok, s in zip(surp.tokens, surp.surprisals):
+            # print(s)
+            cleaned_tok = tok.replace("Ġ", "", 1)#.encode("latin-1").decode("utf-8")
+            curr_word_surp.append(s)
+            curr_toks += cleaned_tok
+
+            words[curr_word_ix] = words[curr_word_ix].replace(cleaned_tok, "", 1)
+            # whole word from the input covered by the subwords
+            if words[curr_word_ix] == "":
+                sent_surps.append(float(sum(curr_word_surp)))
+                curr_word_surp = [0.0]
+                curr_toks = ""
+                curr_word_ix += 1
+        if len(sent_surps)==0:
+            print(s)
+            print(orig_words)
+            print(words)
+            print("ERROR!!!!!!!!!!!!!!!")
+            print(s)
+            print(surp)
+            exit()
+        all_surps.append(sent_surps)
+    return all_surps
+
 def get_surp_story2(stories,df):
     df['surp']=np.nan
     item=0
@@ -422,12 +464,11 @@ def slor(surp,sentence, k=1):
 def normlp(surp,sentence, k):
     return sl(surp,k)*len(sentence.split(" "))/get_unigram_log_prob(sentence,unigram_mapping)
 
-fnames = ["const", "L", "SL11", "SL12", "SL13", "SL14", "SL15", "SL175", "SL20", "SL30", "SL50", "slor1", "normlp1", "slor15", "normlp15" "gini", "kl", "cv"]
-flist = [lambda surp,_: 1, lambda surp,_: sl(surp, 1), lambda surp,_: sl(surp, 1.1), lambda surp,_: sl(surp, 1.2),
-         lambda surp,_: sl(surp, 1.3), lambda surp,_: sl(surp, 1.4), lambda surp,_: sl(surp, 1.5), lambda surp,_: sl(surp, 1.75),
-         lambda surp,_: sl(surp, 2), lambda surp,_: sl(surp, 3), lambda surp,_: sl(surp, 5), lambda surp,sentence: slor(surp,sentence,k=1),
-            lambda surp,sentence: normlp(surp,sentence,k=1), lambda surp,sentence: slor(surp,sentence,k=1.5), lambda surp,sentence: normlp(surp,sentence,k=1.5),
-         gini_coefficient, kl_divergence, cv]
+fnames = ["const", "L"]+["SL_"+str(k) for k in range(25,350,25)] + ["slor_"+str(k) for k in range(25,350,25)]+["normlp_"+str(k) for k in range(25,350,25)] +["gini", "kl", "cv"]
+flist = [lambda surp,_: 1, lambda surp,_: sl(surp, 1)] + [lambda surp,_,k=k: sl(surp, k/100.0) for k in range(25,350,25)]+\
+         [lambda surp,sentence,k=k: slor(surp,sentence,k/100.0) for k in range(25,350,25)]+\
+        [lambda surp,sentence,k=k: normlp(surp,sentence,k/100) for k in range(25,350,25)]+\
+         [gini_coefficient, kl_divergence, cv]
 
 def lme_cross_val(formula, df, d_var, num_folds=10, shuffle=False):
     if shuffle:
@@ -452,14 +493,13 @@ def lme_cross_val(formula, df, d_var, num_folds=10, shuffle=False):
             test_r = ro.conversion.get_conversion().py2rpy(test_data)
 
         model = lme4.lmer(formula, train_r, REML=False)
-        print(dir(lme4))
         res=lme4.residuals_merMod(model)
         res=np.asarray(res)
         sigma=np.mean(res**2)
        # print(result)
        # sigma = np.mean(result.resid**2)
 
-        test_data['predict'] = np.asarray(lme4.predict_merMod(model, newdata=test_r, allow_new_levels=True))
+        test_data.loc[:,'predict'] = np.asarray(lme4.predict_merMod(model, newdata=test_r, allow_new_levels=True))
         estimate = np.log(norm.pdf(test_data[d_var], loc=test_data['predict'], scale=np.sqrt(sigma)))
         estimates.extend(estimate)
 
@@ -596,12 +636,12 @@ def lm_cross_val(formula, df, d_var, family=sm.families.Gaussian(), num_folds=10
     for i in range(num_folds):
         test_data = df[df['fold'] == i]
         train_data = df[df['fold'] != i]
-        with (ro.default_converter + pandas2ri.converter).context():
+        with (ro.default_converter + pandas2ri.converter).context():# do this conversion only once for the whole df, at the top of eval... functions
             train_r = ro.conversion.get_conversion().py2rpy(train_data)
             test_r = ro.conversion.get_conversion().py2rpy(test_data)
         model = stats.glm(formula, train_r,family='binomial')
         sigma = stats.sigma(model)
-        test_data['predict'] = np.asarray(stats.predict(model, newdata=test_r, type="response"))
+        test_data.loc[:,'predict'] = np.asarray(stats.predict(model, newdata=test_r, type="response"))
         estimate = np.log(norm.pdf(test_data[d_var], loc=test_data['predict'], scale=np.sqrt(sigma)))
         estimates.extend(estimate)
     return np.array(estimates),[],[]
@@ -612,7 +652,8 @@ def eval_word(df,dataset_name="", shuffle=False, outdir="results/"):
     print(df)
     print("LENS")
     print(len(df))
-    df=df.dropna(subset=['unigram_log_prob'])
+    df=df.fillna(0.0)
+
     print(len(df))
     with open(f'{outdir}/{dataset_name}_word', 'w') as file:
         results = []
@@ -636,6 +677,8 @@ def eval_word(df,dataset_name="", shuffle=False, outdir="results/"):
             for xname,x in [("Surprisal",surp),("Character length",chlen),  ("Multiply",surp_times_chlen), ("Both",surp_with_chlen),
                             ("Unigram log prob",unigram_log_prob), ("Unigram log prob times chlen",unigram_times_chlen),
                             ("Unigram log prob and chlen",unigram_with_chlen)]:
+                results.append({"measure": xname, "target": m})
+                #results[-1] = {"measure": xname, "target": m}
                 print(xname,file=file)
                 train_x = np.asarray(x[:-500])
                 test_x = np.asarray(x[-500:])
@@ -650,31 +693,32 @@ def eval_word(df,dataset_name="", shuffle=False, outdir="results/"):
                 try:
                     print(pearsonr(x, y), file=file)
                     #add to results
-                    results.append({'measure': xname, 'pearson': pearsonr(x, y)})
+                    results[-1]['pearson']=pearsonr(x, y)[0]
 
                 except:
                     print("can't compute pearson", file=file)
-                    results.append({'measure': xname, 'pearson': np.nan})
+                    results[-1]['pearson'] = 0
                 print("lin reg", file=file)
                 reg = LinearRegression().fit(train_x, train_y)
                 preds = reg.score(train_x, train_y)
-                results.append({'measure': xname, 'linreg_train': preds})
+                results[-1]['linreg_train']= preds
                 print(preds, file=file)
                 preds = reg.score(test_x, test_y)
-                results.append({'measure': xname, 'linreg_test': preds})
+                results[-1]['linreg_test']= preds
                 print(preds, file=file)
                 print("mlp", file=file)
                 reg = MLPRegressor().fit(train_x, train_y)
                 preds = reg.score(train_x, train_y)
-                results.append({'measure': xname, 'mlp_train': preds})
+                results[-1]['mlp_train']= preds
                 print(preds, file=file)
                 preds = reg.score(test_x, test_y)
-                results.append({'measure': xname, 'mlp_test': preds})
+                results[-1]['mlp_test']= preds
                 print(preds, file=file)
-                results=pd.DataFrame(results,columns=['measure', 'pearson', 'linreg_train', 'linreg_test', 'mlp_train', 'mlp_test'])
-                results.to_csv(f'{outdir}/{dataset_name}_word_results.csv')
 
-                print(".........................................................................................", file=file)
+        results=pd.DataFrame(results,columns=['measure', 'target', 'pearson', 'linreg_train', 'linreg_test', 'mlp_train', 'mlp_test'])
+        results.to_csv(f'{outdir}/{dataset_name}_word_results.csv')
+
+        print(".........................................................................................", file=file)
 
 
 
@@ -682,9 +726,12 @@ def eval_word(df,dataset_name="", shuffle=False, outdir="results/"):
 def eval_df(surps_sent,df,test=500, dataset_name="", shuffle=False, outdir="results/"):
     df_sent=df.loc[~df[['sent', 'WorkerId']].duplicated(keep='first')]
     df_sent=df_sent.dropna(subset='TotalRT')
-    print(df_sent)
-
+    #print(df_sent)
+    uniq = df.loc[~df[['item', 'zone']].duplicated(keep='first')]
+    df['meanUnigramLogProb'] = df['meanUnigramLogProb'].fillna(0.0)
+    df['meanUnigramLogProb_times_len'] = df['meanUnigramLogProb_times_len'].fillna(0.0)
     for fn, f in zip(fnames, flist):
+        nans=0
         print(fn)
         out = []
         out_times_len = []
@@ -713,7 +760,11 @@ def eval_df(surps_sent,df,test=500, dataset_name="", shuffle=False, outdir="resu
                 #print("ERROR!!!!!!! wrong surp")
                 #break
             n = len(surp)
-            fval = f(surp)
+
+            fval = f(surp,' '.join(uniq[uniq['sent']==i]['word'].to_list()))
+            if np.isnan(fval):
+                fval=0.0
+                nans+=1
             for idx,rt in sents.iterrows():
                 if int((rt['sent_len']))!=n:
                     print("ERROR!!!!!!! wrong sent len")
@@ -749,6 +800,7 @@ def eval_df(surps_sent,df,test=500, dataset_name="", shuffle=False, outdir="resu
         df_sent.loc[:, 'logMeanOverWordsWorkerRT'] = np.log(df_sent['MeanOverWordsWorkerRT'])
     print(df_sent)
     for measure in fnames+['meanUnigramLogProb']:
+        results=[]
         print("********************************************")
         print(measure)
         print("********************************************")
@@ -760,7 +812,7 @@ def eval_df(surps_sent,df,test=500, dataset_name="", shuffle=False, outdir="resu
 
 
         for rts_t in ['TotalRT','MeanOverWordsRT','MeanOverWorkersRT','MeanOverWordsWorkerRT', 'logTotalRT','logMeanOverWordsRT','logMeanOverWorkersRT','logMeanOverWordsWorkerRT']:
-            col_list=['sent', 'WorkerId', 'sent_len', rts_t]
+            col_list=['sent', 'WorkerId', 'sent_len', 'meanUnigramLogProb', 'meanUnigramLogProb_times_len', rts_t]
             col_list.extend([m+'_times_len' for m in fnames])
             col_list.extend([m for m in fnames])
             df_sent_tgt= df_sent_shuf[col_list]
@@ -779,11 +831,12 @@ def eval_df(surps_sent,df,test=500, dataset_name="", shuffle=False, outdir="resu
             with open(f'{outdir}/{dataset_name}_{measure}_{rts_t}', 'w') as file:
                 for xname,x in [("metric",out), ("metric times len",out_times_len), ("metric and len",out_lens)]:
                     print(xname, file=file)
+                    results.append({'target': rts_t, 'measure': measure, 'mult': xname})
                     #print(y,file=file)
                     print(measure, file=file)
                     print("len all", len(out), file=file)
                     print(len(out), file=file)
-
+                    print(f"{nans} nans",file=file)
                     train_x = np.asarray(x[:-test])
                     test_x = np.asarray(x[-test:])
                     train_y = np.asarray(y[:-test])
@@ -794,36 +847,36 @@ def eval_df(surps_sent,df,test=500, dataset_name="", shuffle=False, outdir="resu
                     try:
                         print(pearsonr(x, y), file=file)
                         # add to results
-                        results.append({'target': rts_t, 'measure': xname, 'pearson': pearsonr(x, y)})
+                        results[-1]["pearson"]=pearsonr(x, y)[0]
                     except:
                         print("can't compute pearson", file=file)
-                        results.append({'target': rts_t, 'measure': xname, 'pearson': np.nan})
+                        results[-1]["pearson"]=np.nan
 
                     print("lin reg", file=file)
                     reg = LinearRegression().fit(train_x, train_y)
                     preds = reg.score(train_x, train_y)
-                    results.append({'target': rts_t, 'measure': xname, 'linreg_train': preds})
+                    results[-1]["linreg_train"]=preds
                     print(preds, file=file)
                     preds = reg.score(test_x,test_y)
-                    results.append({'target': rts_t, 'measure': xname, 'linreg_test': preds})
+                    results[-1]["linreg_test"]=preds
                     print(preds, file=file)
 
                     print("svr", file=file)
                     reg = svm.SVR().fit(train_x, train_y)
                     preds = reg.score(train_x, train_y)
-                    results.append({'target': rts_t, 'measure': xname, 'svr_train': preds})
+                    results[-1]["svr_train"]=preds
                     print(preds, file=file)
                     preds = reg.score(test_x, test_y)
-                    results.append({'target': rts_t, 'measure': xname, 'svr_test': preds})
+                    results[-1]["svr_test"]=preds
                     print(preds, file=file)
 
                     print("mlp", file=file)
                     reg = MLPRegressor().fit(train_x, train_y)
                     preds = reg.score(train_x, train_y)
-                    results.append({'target': rts_t, 'measure': xname, 'mlp_train': preds})
+                    results[-1]["mlp_train"]=preds
                     print(preds, file=file)
                     preds = reg.score(test_x,test_y)
-                    results.append({'target': rts_t, 'measure': xname, 'mlp_test': preds})
+                    results[-1]["mlp_test"]=preds
                     print(preds, file=file)
 
                     try:
@@ -833,6 +886,7 @@ def eval_df(surps_sent,df,test=500, dataset_name="", shuffle=False, outdir="resu
                         out_lens_scaled = scaler.transform(out_lens)
                         reg = MLPRegressor().fit(out_lens_scaled[:-test], train_y)
                         preds = reg.score(out_lens_scaled[:-test], train_y)
+
                         print(preds, file=file)
 
                         preds = reg.score(out_lens_scaled[-test:], test_y)
@@ -841,296 +895,333 @@ def eval_df(surps_sent,df,test=500, dataset_name="", shuffle=False, outdir="resu
                         pass
                     print("...................................................", file=file)
 
-                print("Lmer baseline", file=file)
-                model = pymer4.Lmer(rts_t+" ~ "  +"sent_len + I(sent_len*meanUnigramLogProb)*sent_chlen + (sent_len+0 | WorkerId) ", data=df_sent_shuf[:-test])
-                print(model.fit(REML=False), file=file)
-                #print(model.summary(), file=file)
-                print("LogLike", model.logLike, file=file)
-
-                print("Lmer baseline2", file=file)
-                model = pymer4.Lmer(rts_t + " ~ " + "sent_len + I(sent_len)*sent_chlen + (sent_len+0 | WorkerId) ",
-                                    data=df_sent_shuf[:-test])
-                print(model.fit(REML=False), file=file)
-                # print(model.summary(), file=file)
-                print("LogLike", model.logLike, file=file)
-
-                # print("Lmer", file=file)
-                # model = pymer4.Lmer(rts_t+' ~ '+measure+':sent_len + ( '+ measure  +' + sent_len + 0 | WorkerId) + ('+'+'
-                #                     .join(["const", "L", "SL11", "SL12", "SL13", "SL20", "SL30", "gini", "kl", "cv"])+')', data=df_sent_shuf[:-test])
-                # #    baseline <- lme_cross_val("time_sum ~   time_count_nonzero +len + I(len*uni_log_prob_power_1.0)*ch_len + (  len+0 | WorkerId_) ",
-                #
+                # print("Lmer baseline", file=file)
+                # model = pymer4.Lmer(rts_t+" ~ "  +"sent_len + I(sent_len*meanUnigramLogProb)*sent_chlen + (sent_len+0 | WorkerId) ", data=df_sent_shuf[:-test])
                 # print(model.fit(REML=False), file=file)
-                # print(model.summary(), file=file)
+                # #print(model.summary(), file=file)
                 # print("LogLike", model.logLike, file=file)
-                #
-                # print("Lmer", file=file)
-                # model = pymer4.Lmer(rts_t+' ~ '+measure+':sent_len + ( sent_len + 0 | WorkerId) + ('+'+'.
-                #                     join(["const", "L", "SL11", "SL12", "SL13", "SL20", "SL30", "gini", "kl", "cv"])+')', data=df_sent_shuf[:-test])
+                # 
+                # print("Lmer baseline2", file=file)
+                # model = pymer4.Lmer(rts_t + " ~ " + "sent_len + I(sent_len)*sent_chlen + (sent_len+0 | WorkerId) ",
+                #                     data=df_sent_shuf[:-test])
                 # print(model.fit(REML=False), file=file)
-                # print(model.summary(), file=file)
+                # # print(model.summary(), file=file)
                 # print("LogLike", model.logLike, file=file)
-                #
+                # 
+                # # print("Lmer", file=file)
+                # # model = pymer4.Lmer(rts_t+' ~ '+measure+':sent_len + ( '+ measure  +' + sent_len + 0 | WorkerId) + ('+'+'
+                # #                     .join(["const", "L", "SL11", "SL12", "SL13", "SL20", "SL30", "gini", "kl", "cv"])+')', data=df_sent_shuf[:-test])
+                # # #    baseline <- lme_cross_val("time_sum ~   time_count_nonzero +len + I(len*uni_log_prob_power_1.0)*ch_len + (  len+0 | WorkerId_) ",
+                # #
+                # # print(model.fit(REML=False), file=file)
+                # # print(model.summary(), file=file)
+                # # print("LogLike", model.logLike, file=file)
+                # #
+                # # print("Lmer", file=file)
+                # # model = pymer4.Lmer(rts_t+' ~ '+measure+':sent_len + ( sent_len + 0 | WorkerId) + ('+'+'.
+                # #                     join(["const", "L", "SL11", "SL12", "SL13", "SL20", "SL30", "gini", "kl", "cv"])+')', data=df_sent_shuf[:-test])
+                # # print(model.fit(REML=False), file=file)
+                # # print(model.summary(), file=file)
+                # # print("LogLike", model.logLike, file=file)
+                # #
+                # 
+                # print("Lmer main", file=file)
+                # 
+                # model = pymer4.Lmer(rts_t + ' ~  '+ measure + ':sent_len + sent_len + (sent_len*meanUnigramLogProb)*sent_chlen+('+measure+'+sent_len + 0 | WorkerId)',
+                #                     data=df_sent_shuf[:-test])
+                # print(model.fit(REML=False), file=file)
+                # #print(model.summary(), file=file)
+                # print("LogLike", model.logLike, file=file)
+                # #print(model.predict(df_sent[-test:]), file=file)
+                # 
+                # print("Lmer sent", file=file)
+                # 
+                # model = pymer4.Lm(rts_t + ' ~  sent_len',
+                #                     data=df_sent_shuf[:-test])
+                # print(model.fit(REML=False), file=file)
+                # #print(model.summary(), file=file)
+                # print("LogLike", model.logLike, file=file)
+                # #print(model.predict(df_sent[-test:]), file=file)
+                # 
+                # print("Lmer measure:sent_len", file=file)
+                # 
+                # model = pymer4.Lm(rts_t + ' ~  '+ measure + ':sent_len',
+                #                     data=df_sent_shuf[:-test])
+                # print(model.fit(REML=False), file=file)
+                # #print(model.summary(), file=file)
+                # print("LogLike", model.logLike, file=file)
+                # #print(model.predict(df_sent[-test:]), file=file)
+                # 
+                # print("Lmer measure", file=file)
+                # 
+                # model = pymer4.Lm(rts_t + ' ~  ' + measure,
+                #                   data=df_sent_shuf[:-test])
+                # print(model.fit(REML=False), file=file)
+                # # print(model.summary(), file=file)
+                # print("LogLike", model.logLike, file=file)
+                # # print(model.predict(df_sent[-test:]), file=file)
 
-                print("Lmer main", file=file)
-
-                model = pymer4.Lmer(rts_t + ' ~  '+ measure + ':sent_len + sent_len + (sent_len*meanUnigramLogProb)*sent_chlen+('+measure+'+sent_len + 0 | WorkerId)',
-                                    data=df_sent_shuf[:-test])
-                print(model.fit(REML=False), file=file)
-                #print(model.summary(), file=file)
-                print("LogLike", model.logLike, file=file)
-                #print(model.predict(df_sent[-test:]), file=file)
-
-                print("Lmer sent", file=file)
-
-                model = pymer4.Lm(rts_t + ' ~  sent_len',
-                                    data=df_sent_shuf[:-test])
-                print(model.fit(REML=False), file=file)
-                #print(model.summary(), file=file)
-                print("LogLike", model.logLike, file=file)
-                #print(model.predict(df_sent[-test:]), file=file)
-
-                print("Lmer measure:sent_len", file=file)
-
-                model = pymer4.Lm(rts_t + ' ~  '+ measure + ':sent_len',
-                                    data=df_sent_shuf[:-test])
-                print(model.fit(REML=False), file=file)
-                #print(model.summary(), file=file)
-                print("LogLike", model.logLike, file=file)
-                #print(model.predict(df_sent[-test:]), file=file)
-
-                print("Lmer measure", file=file)
-
-                model = pymer4.Lm(rts_t + ' ~  ' + measure,
-                                  data=df_sent_shuf[:-test])
-                print(model.fit(REML=False), file=file)
-                # print(model.summary(), file=file)
-                print("LogLike", model.logLike, file=file)
-                # print(model.predict(df_sent[-test:]), file=file)
-
-                print("Lmer masdasdASDASDASDASDASD")
+                print("Lmer base")
                 #formula=rts_t + " ~ " + "sent_len + I(sent_len*meanUnigramLogProb)*sent_chlen"
                 #formula=rts_t + " ~ " + "sent_len + I(sent_len*meanUnigramLogProb)*sent_chlen+("+measure+"+sent_len + 0 | WorkerId)"
                 formula = rts_t + " ~ " + "sent_len + sent_len*meanUnigramLogProb*sent_chlen+(" + measure + "+sent_len + 0 | WorkerId)"
                 baseline=lme_cross_val(formula, df_sent, rts_t, num_folds=10, shuffle=False)
                 print(np.mean(baseline), file=file)
-                results.append({'target': rts_t, 'measure': xname, 'lme baseline': np.mean(baseline)})
+                results[-1]['lme_baseline']=np.mean(baseline)
                 #formula= rts_t + ' ~  ' + measure + ':sent_len + I(sent_len*meanUnigramLogProb)*sent_chlen+('+measure+'+sent_len + 0 | WorkerId)'
                 formula = rts_t + ' ~  ' + measure + ':sent_len + sent_len*meanUnigramLogProb*sent_chlen+(' + measure + '+sent_len + 0 | WorkerId)'
                 cv=lme_cross_val(formula, df_sent, rts_t, num_folds=10, shuffle=False)
                 print(np.mean(cv), file=file)
-                results.append({'target': rts_t, 'measure': xname, 'lme': np.mean(cv)})
+                results[-1]['lme']=np.mean(cv)
                 print(np.mean(cv - baseline), np.var(cv - baseline) / len(cv), np.mean(cv), file=file)
-                results.append({'target': rts_t, 'measure': xname, 'lme diff': np.mean(cv - baseline)})
-                results=pd.DataFrame(results,columns=['target','measure','pearson','linreg_train','linreg_test','svr_train','svr_test','mlp_train','mlp_test'])
-
-                results.to_csv(f'{outdir}/{dataset_name}_{measure}_{rts_t}_results.csv')
-
-                print("...............................................................................")
-
-
-                print("...............................................................................")
+                results[-1]['lme_diff']=np.mean(cv - baseline)
+        results=pd.DataFrame(results)
+        results.to_csv(f'{outdir}/{dataset_name}_{measure}_results.csv')
 
 def eval_cola(df,dev=None, dataset_name="", shuffle=False, outdir="results/"):
-    for fn in fnames+[f+"_times_len" for f in fnames]:
+    for drop in [True,False]:
+        if drop:
+            print("DROPPING")
+            df=df.dropna(subset=['slor','normlp'])
+            if dev:
+                dev=dev.dropna(subset=['slor','normlp'])
+        else:
 
-        with (open(f'{outdir}/{dataset_name}_{fn}', 'w') as file):
-            results={}
-            df=df.fillna(0.0) #dropna(subset=['slor','normlp'])
-            df_majority = df[df.label == 1]
-            df_minority = df[df.label == 0]
-
-            # Upsample minority class
-            df_minority_upsampled = df_minority.sample(n=len(df_majority), replace=True,
-                                                       random_state=123)  # Random state for reproducibility
-
-            # Combine majority class with upsampled minority class
-            df_upsampled = pd.concat([df_majority, df_minority_upsampled])
-
-            # Display new class counts
-            df=df_upsampled
-            x=df[fn]
-            y=df['label']
-            train_x = np.asarray(x[:-500])
-            train_y = np.asarray(y[:-500])
-            test_x = np.asarray(x[-500:])
-            test_y = np.asarray(y[-500:])
-            print("baseline", file=file)
-            print(accuracy_score(train_y, [1 for i in range(len(train_x))]), file=file)
-            print(accuracy_score(test_y, [1 for i in range(len(test_x))]), file=file)
-            results['baseline']= accuracy_score(train_y, [1 for i in range(len(train_x))])
-            results['baseline_test']= accuracy_score(test_y, [1 for i in range(len(test_x))])
-            if dev is not None:
-                dev_x=np.asarray(dev[fn])
-                dev_y=np.asarray(dev['label'])
-                print("baseline dev",file=file)
-                print(accuracy_score(dev_y, [1 for i in range(len(dev_x))]), file=file)
-            print(fn, file=file)
-            print(pearsonr(train_x, train_y), file=file)
-            results['pearson']=pearsonr(train_x, train_y)[0]
-            print(train_x.reshape(-1,1))
-            print(train_y)
-            print("svm", file=file)
-            clf = svm.SVC()
-            reg = clf.fit(train_x.reshape(-1,1), train_y)
-            preds = reg.score(train_x.reshape(-1,1), train_y)
-            print(preds, file=file)
-            results['svm_train']=preds
-            preds = reg.score(test_x.reshape(-1,1), test_y)
-            print(preds, file=file)
-            results['svm_test']=preds
-            if dev is not None:
-                preds = reg.score(dev_x.reshape(-1,1), dev_y)
-                print(preds, file=file)
-
-            print("mlp", file=file)
-            reg = MLPClassifier().fit(train_x.reshape(-1,1), train_y)
-            preds = reg.score(train_x.reshape(-1,1), train_y)
-            print(preds, file=file)
-            results['mlp_train']=preds
-            preds = reg.score(test_x.reshape(-1,1), test_y)
-            print(preds, file=file)
-            results['mlp_test']=preds
-            if dev is not None:
-                preds = reg.score(dev_x.reshape(-1,1), dev_y)
-                print(preds, file=file)
-
-            print("mlp (scaled)", file=file)
-            scaler = StandardScaler()
-            scaler.fit(train_x.reshape(-1, 1))
-            train_x_scaled=scaler.transform(train_x.reshape(-1, 1))
-            reg = MLPClassifier().fit(train_x_scaled, train_y)
-            preds = reg.score(train_x_scaled, train_y)
-            print(preds, file=file)
-            results['mlp_scaled_train']=preds
-            test_x_scaled=scaler.transform(test_x.reshape(-1, 1))
-            preds = reg.score(test_x_scaled, test_y)
-            print(preds, file=file)
-            results['mlp_scaled_test']=preds
-            model = pymer4.Lm(
-                'label ~ sent_len',
-                data=df)
-            print(model.fit(REML=False), file=file)
-
-            # print(model.summary(), file=file)
-            print("LogLike", model.logLike, file=file)
-
-            model = pymer4.Lm(
-                'label ~ ' + fn + ':sent_len',
-                data=df)
-            print(model.fit(REML=False), file=file)
-            # print(model.summary(), file=file)
-            print("LogLike", model.logLike, file=file)
-
-            model = pymer4.Lm(
-                'label ~ ' + fn ,
-                data=df)
-            print(model.fit(REML=False), file=file)
-            # print(model.summary(), file=file)
-            print("LogLike", model.logLike, file=file)
+            df = df.fillna(0.0)  # dropna(subset=['slor','normlp'])
+            if dev:
+                dev = dev.fillna(0.0)  # dropna(subset=['slor','normlp'])
 
 
-            print("=============================================", file=file)
-            family=sm.families.Binomial()
+        family = sm.families.Binomial()
 
-            print("baseline", file=file)
-            baseline, accs, accs_base = lm_cross_val(f"label ~ sent_len", df, 'label', family)
-            print(baseline,file=file)
-            #print(np.mean(accs), file=file)
-            #print(np.mean(accs_base), file=file)
-            results['lme_baseline']=np.mean(baseline)
-            print("baseline 2", file=file)
-            baseline, accs, accs_base = lm_cross_val(f"label ~ sent_len + slor + normlp", df, 'label', family)
-            print(baseline,file=file)
-            #print(np.mean(accs), file=file)
-            #print(np.mean(accs_base), file=file)
-            results['lme_baseline2']=np.mean(baseline)
+        baseline, accs, accs_base = lm_cross_val(f"label ~ sent_len", df, 'label', family)
 
-            print("baseline 3", file=file)
-            baseline, accs, accs_base = lm_cross_val(f"label ~  slor + normlp", df, 'label', family)
-            print(baseline, file=file)
-            #print(np.mean(accs), file=file)
-            #print(np.mean(accs_base), file=file)
-            results['lme_baseline3']=np.mean(baseline)
+        base1 = np.mean(baseline)
+        baseline, accs, accs_base = lm_cross_val(f"label ~ sent_len + slor + normlp", df, 'label', family)
+        base2 = np.mean(baseline)
 
 
-            print("baseline 4", file=file)
-            baseline, accs, accs_base = lm_cross_val(f"label ~  1", df, 'label', family)
-            print(baseline, file=file)
-            #print(np.mean(accs), file=file)
-            #print(np.mean(accs_base), file=file)
-            results['lme_baseline4']=np.mean(baseline)
+        baseline, accs, accs_base = lm_cross_val(f"label ~  slor + normlp", df, 'label', family)
+        # print(np.mean(accs), file=file)
+        # print(np.mean(accs_base), file=file)
+        base3 = np.mean(baseline)
+
+        baseline, accs, accs_base = lm_cross_val(f"label ~  1", df, 'label', family)
+        # print(np.mean(accs), file=file)
+        # print(np.mean(accs_base), file=file)
+        base4=np.mean(baseline)
+
+        for fn in fnames+[f+"_times_len" for f in fnames]:
+            with (open(f'{outdir}/{dataset_name}_{fn}_drop_{drop}', 'w') as file):
+                try:
+                    power = int(
+                        fn.replace("SL_", "").replace("_times_len", "").replace("slor_", "").replace(
+                            "normlp_", ""))
+                except:
+                    power = 0.0
+                results={"measure":fn.replace('_times_len','').replace('_'+str(power),''),"drop":drop, "times_len":fn.endswith("_times_len"), "power":power/100.0}
+
+                df_majority = df[df.label == 1]
+                df_minority = df[df.label == 0]
+
+                # Upsample minority class
+                df_minority_upsampled = df_minority.sample(n=len(df_majority), replace=True,
+                                                           random_state=123)  # Random state for reproducibility
+
+                # Combine majority class with upsampled minority class
+                df_upsampled = pd.concat([df_majority, df_minority_upsampled])
+
+               # df=df_upsampled
+                x=np.asarray(df[fn])
+                y=df['label']
+                #train_x = np.asarray(x[:-500])
+                #train_y = np.asarray(y[:-500])
+                #test_x = np.asarray(x[-500:])
+                #test_y = np.asarray(y[-500:])
+                #print(test_y)
+                #print("baseline", file=file)
+                #print(accuracy_score(train_y, [1 for i in range(len(train_x))]), file=file)
+                #print(accuracy_score(test_y, [1 for i in range(len(test_x))]), file=file)
+                results['baseline']= accuracy_score(y, [1 for i in range(len(x))])
+                #results['baseline_test']= accuracy_score(test_y, [1 for i in range(len(test_x))])
+                if dev is not None:
+                    dev_x=np.asarray(dev[fn])
+                    dev_y=np.asarray(dev['label'])
+                    print("baseline dev",file=file)
+                    print(accuracy_score(dev_y, [1 for i in range(len(dev_x))]), file=file)
+                print(fn, file=file)
+                print(pearsonr(x, y), file=file)
+                results['pearson']=pearsonr(x, y)[0]
+
+                print("LR")
+                LR = LogisticRegression(random_state=0, solver='lbfgs', multi_class='ovr')
+                # .fit(train_x.reshape(-1,1),train_y)
+                # score=LR.score(test_x.reshape(-1,1),test_y)
+                scores = cross_val_score(LR, x.reshape(-1, 1), y, cv=10)
+                score = np.mean(scores)
+                results['lr_test'] = score
+                print(score)
+
+                print("svm", file=file)
+                clf = svm.SVC()
+                #reg = clf.fit(train_x.reshape(-1,1), train_y)
+                #preds = reg.score(train_x.reshape(-1,1), train_y)
+
+                #print(preds, file=file)
+                #results['svm_train']=preds
+                #preds = reg.score(test_x.reshape(-1,1), test_y)
+                #print(preds, file=file)
+                scores=cross_val_score(clf, x.reshape(-1, 1), y, cv=10)
+                results['svm_test']=np.mean(scores)
+                if dev is not None:
+                    preds = clf.score(dev_x.reshape(-1,1), dev_y)
+                    print(preds, file=file)
+
+                print("mlp", file=file)
+                mlp = MLPClassifier()#.fit(train_x.reshape(-1,1), train_y)
+                #preds = reg.score(train_x.reshape(-1,1), train_y)
+                #print(preds, file=file)
+                #results['mlp_train']=preds
+                #preds = reg.score(test_x.reshape(-1,1), test_y)
+                #print(preds, file=file)
+                scores=cross_val_score(mlp, x.reshape(-1, 1), y, cv=10)
+                results['mlp_test']=np.mean(scores)
+                if dev is not None:
+                    preds = mlp.score(dev_x.reshape(-1,1), dev_y)
+                    print(preds, file=file)
+
+                print("mlp (scaled)", file=file)
+                scaler = StandardScaler()
+                scaler.fit(x.reshape(-1, 1))
+                x_scaled=scaler.transform(x.reshape(-1, 1))
+                mlp = MLPClassifier()
+                #preds = reg.score(train_x_scaled, train_y)
+                #print(preds, file=file)
+                #results['mlp_scaled_train']=preds
+                #test_x_scaled=scaler.transform(test_x.reshape(-1, 1))
+                #preds = reg.score(test_x_scaled, test_y)
+                #print(preds, file=file)
+                scores = cross_val_score(mlp, x_scaled, y, cv=10)
+                results['mlp_scaled_test']=np.mean(scores)
+                # model = pymer4.Lm(
+                #     'label ~ sent_len',
+                #     data=df)
+                # print(model.fit(REML=False), file=file)
+                #
+                # # print(model.summary(), file=file)
+                # print("LogLike", model.logLike, file=file)
+                #
+                # model = pymer4.Lm(
+                #     'label ~ ' + fn + ':sent_len',
+                #     data=df)
+                # print(model.fit(REML=False), file=file)
+                # # print(model.summary(), file=file)
+                # print("LogLike", model.logLike, file=file)
+                #
+                # model = pymer4.Lm(
+                #     'label ~ ' + fn ,
+                #     data=df)
+                # print(model.fit(REML=False), file=file)
+                # # print(model.summary(), file=file)
+                # print("LogLike", model.logLike, file=file)
 
 
-            print(f"{fn}", file=file)
-            formula = f"label ~ {fn}"
-            cv,accs, accs_base = lm_cross_val(formula, df, 'label', family)
-            print(cv,file=file)
-            print(np.mean(cv - baseline), np.var(cv - baseline) / len(cv), np.mean(cv), file=file)
-            #print(np.mean(accs), file=file)
-            #print(np.mean(accs_base), file=file)
-            results['lme_fn']=np.mean(baseline)
+                print("=============================================", file=file)
+
+                results['lme_baseline']=base1
+                results['lme_baseline2']=base2
+                results['lme_baseline3']=base3
+                results['lme_baseline4']=base4
 
 
-            print(f"{fn}+sent_len", file=file)
-            formula = f"label ~ {fn} + sent_len"
-            cv,accs, accs_base = lm_cross_val(formula, df, 'label', family)
-            print(cv,file=file)
-            print(np.mean(cv - baseline), np.var(cv - baseline) / len(cv), np.mean(cv), file=file)
-            #print(np.mean(accs), file=file)
-            #print(np.mean(accs_base), file=file)
-
-            print(f"{fn}+sent_len + slor + normlp", file=file)
-            formula = f"label ~ {fn} + sent_len + slor + normlp"
-            cv,accs, accs_base = lm_cross_val(formula, df, 'label', family)
-            print(cv,file=file)
-            print(np.mean(cv - baseline), np.var(cv - baseline) / len(cv), np.mean(cv), file=file)
-            #print(np.mean(accs), file=file)
-            #print(np.mean(accs_base), file=file)
-            results['lme_fn_len_slor_normlp']=np.mean(baseline)
-
-            print(f"{fn}:sent_len + slor + normlp", file=file)
-            formula = f"label ~ {fn}:sent_len + slor + normlp"
-            cv, accs, accs_base = lm_cross_val(formula, df, 'label', family)
-            print(cv, file=file)
-            print(np.mean(cv - baseline), np.var(cv - baseline) / len(cv), np.mean(cv), file=file)
-            #print(np.mean(accs), file=file)
-            #print(np.mean(accs_base), file=file)
-            results['lme_fn:len_slor_normlp']=np.mean(baseline)
+                print(f"{fn}", file=file)
+                formula = f"label ~ {fn}"
+                cv,accs, accs_base = lm_cross_val(formula, df, 'label', family)
+                print(cv,file=file)
+                print(np.mean(cv - baseline), np.var(cv - baseline) / len(cv), np.mean(cv), file=file)
+                #print(np.mean(accs), file=file)
+                #print(np.mean(accs_base), file=file)
+                results['lme_fn']=np.mean(cv)
 
 
-            print(f"{fn}:sent_len", file=file)
-            formula = f"label ~ {fn}:sent_len"
-            cv,accs, accs_base = lm_cross_val(formula, df, 'label', family)
-            print(cv,file=file)
-            print(np.mean(cv - baseline), np.var(cv - baseline) / len(cv), np.mean(cv), file=file)
-            #print(np.mean(accs), file=file)
-            #print(np.mean(accs_base), file=file)
+                print(f"{fn}+sent_len", file=file)
+                formula = f"label ~ {fn} + sent_len"
+                cv,accs, accs_base = lm_cross_val(formula, df, 'label', family)
+                print(cv,file=file)
+                print(np.mean(cv - baseline), np.var(cv - baseline) / len(cv), np.mean(cv), file=file)
+                #print(np.mean(accs), file=file)
+                #print(np.mean(accs_base), file=file)
 
-            formula = f"label ~ {fn}:sent_len + sent_len"
-            cv,accs, accs_base = lm_cross_val(formula, df, 'label', family)
-            print(cv,file=file)
-            print(np.mean(cv - baseline), np.var(cv - baseline) / len(cv), np.mean(cv), file=file)
-            #print(np.mean(accs), file=file)
-            #print(np.mean(accs_base), file=file)
-            print(results)
-            results=pd.DataFrame.from_dict(results,index=[0])
-            print(results)
-            results.to_csv(f'{outdir}/{dataset_name}_{fn}_results.csv')
+                print(f"{fn}+sent_len + slor + normlp", file=file)
+                formula = f"label ~ {fn} + sent_len + slor + normlp"
+                cv,accs, accs_base = lm_cross_val(formula, df, 'label', family)
+                print(cv,file=file)
+                print(np.mean(cv - baseline), np.var(cv - baseline) / len(cv), np.mean(cv), file=file)
+                #print(np.mean(accs), file=file)
+                #print(np.mean(accs_base), file=file)
+                results['lme_fn_len_slor_normlp']=np.mean(cv)
+
+                print(f"{fn}:sent_len + slor + normlp", file=file)
+                formula = f"label ~ {fn}:sent_len + slor + normlp"
+                cv, accs, accs_base = lm_cross_val(formula, df, 'label', family)
+                print(cv, file=file)
+                print(np.mean(cv - baseline), np.var(cv - baseline) / len(cv), np.mean(cv), file=file)
+                #print(np.mean(accs), file=file)
+                #print(np.mean(accs_base), file=file)
+                results['lme_fn:len_slor_normlp']=np.mean(cv)
+
+                print(f"{fn}:sent_len + sent_len+ slor + normlp", file=file)
+                formula = f"label ~ {fn}:sent_len + sent_len + slor + normlp"
+                cv, accs, accs_base = lm_cross_val(formula, df, 'label', family)
+                print(cv, file=file)
+                print(np.mean(cv - baseline), np.var(cv - baseline) / len(cv), np.mean(cv), file=file)
+                #print(np.mean(accs), file=file)
+                #print(np.mean(accs_base), file=file)
+                results['lme_fn:len_len_slor_normlp']=np.mean(cv)
 
 
-            print("...................................................", file=file)
+                print(f"{fn}:sent_len", file=file)
+                formula = f"label ~ {fn}:sent_len"
+                cv,accs, accs_base = lm_cross_val(formula, df, 'label', family)
+                print(cv,file=file)
+                print(np.mean(cv - baseline), np.var(cv - baseline) / len(cv), np.mean(cv), file=file)
+                #print(np.mean(accs), file=file)
+                #print(np.mean(accs_base), file=file)
+
+                formula = f"label ~ {fn}:sent_len + sent_len"
+                cv,accs, accs_base = lm_cross_val(formula, df, 'label', family)
+                print(cv,file=file)
+                print(np.mean(cv - baseline), np.var(cv - baseline) / len(cv), np.mean(cv), file=file)
+                #print(np.mean(accs), file=file)
+                #print(np.mean(accs_base), file=file)
+                print(results)
+                results=pd.DataFrame([results])
+                print(results)
+                results.to_csv(f'{outdir}/{dataset_name}_{fn}_drop={drop}_results.csv')
 
 
-def compute_metrics(surps,df):
+                print("...................................................", file=file)
+
+
+
+def compute_metrics(surps, unigram_log_probs, df, sentences):
+    assert len(surps) == len(unigram_log_probs) == len(sentences)
     for fn, f in zip(fnames, flist):
         out = []
         lens = []
-        for sent_surp in surps:
-            fval = f(np.asarray(sent_surp))
+        for sent_surp,unigram_log_prob, sent in zip(surps, unigram_log_probs, sentences):
+            if "unigram" in fn.lower():
+                fval = f(np.asarray(unigram_log_prob),sent)
+            else:
+                fval = f(np.asarray(sent_surp),sent)
             out.append(fval)
             lens.append(float(len(sent_surp)))
+        print(fn)
+        print(len(out))
+        print(len(df))
         df.loc[:, fn] = out
         df.loc[:, fn+'_times_len'] = np.asarray(out)*np.asarray(lens)
+    df=add_lau_accept_measures(df)
     return df
 
 
@@ -1279,30 +1370,35 @@ def filter_z(df):
     return sent_rt
 
 
+if parser.parse_args().cola:
 
-df_cola=read_cola()
-print(df_cola)
-sents_cola=df_cola['sentence'].tolist()
-df_cola=get_surp_cola(sents_cola,df_cola)
-print(df_cola)
+    df_cola = read_cola()
+    print(df_cola)
 
-df_cola_dev=read_cola(filename='cola_public/raw/in_domain_dev.tsv')
-sents_cola_dev=df_cola_dev['sentence'].tolist()
-df_cola_dev=get_surp_cola(sents_cola_dev,df_cola_dev)
+    sents_cola = df_cola['sentence'].tolist()
+    surps_cola = get_surp_cola_new(sents_cola)
+    unigram_log_probs = [string_to_uni_log_probs(s) for s in sents_cola]
+    df_cola = compute_metrics(surps_cola, unigram_log_probs, df_cola, sents_cola)
+    print(df_cola)
 
-eval_cola(df_cola,dev=df_cola_dev,dataset_name="cola", outdir=outdir)
+    # df_cola_dev=read_cola(filename='cola_public/raw/in_domain_dev.tsv')
+    # sents_cola_dev=df_cola_dev['sentence'].tolist()
+    # surps_cola_dev=get_surp_cola(sents_cola_dev,df_cola_dev)
+    # unigram_log_probs_dev=[string_to_uni_log_probs(s) for s in sents_cola_dev]
+    # df_cola_dev=compute_metrics(surps_cola_dev, unigram_log_probs_dev, df_cola_dev, sents_cola_dev)
+    # print(df_cola_dev)
 
-surps=[]
-surps_dev=[]
-for s in sents_cola:
-    surps.append(score_gpt(s, model, tokenizer)[0])
-df_cola=compute_metrics(surps,df_cola)
-for s in sents_cola_dev:
-    surps_dev.append(score_gpt(s, model, tokenizer)[0])
-df_cola_dev=compute_metrics(surps_dev,df_cola_dev)
-eval_cola(df_cola,dev=df_cola_dev,dataset_name="cola2", outdir=outdir)
+    eval_cola(df_cola, dev=None, dataset_name="cola", outdir=outdir)
 
-
+    surps = []
+    surps_dev = []
+    for s in sents_cola:
+        surps.append(score_gpt(s, model, tokenizer)[0])
+    df_cola = compute_metrics(surps, unigram_log_probs, df_cola, sents_cola)
+    # for s in sents_cola_dev:
+    #    surps_dev.append(score_gpt(s, model, tokenizer)[0])
+    # df_cola_dev=compute_metrics(surps_dev,df_cola_dev, sents_cola_dev)
+    eval_cola(df_cola, dev=None, dataset_name="cola2", outdir=outdir)
 
 df_brown=read_brown()
 df=read_ns()
@@ -1339,10 +1435,13 @@ df_brown = df_brown.merge(sent_rt_brown, on=['sent', 'WorkerId'],
 
 df.to_csv(f'{outdir}/out_natural.tsv', sep='\t')
 df_brown.to_csv(f'{outdir}/out_brown.tsv', sep='\t')
-eval_word(df,dataset_name="naturalstories", outdir=outdir)
-eval_word(df_brown,dataset_name="brown", outdir=outdir)
+#eval_word(df,dataset_name="naturalstories", outdir=outdir)
+#eval_word(df_brown,dataset_name="brown", outdir=outdir)
 eval_df(None,df_brown,dataset_name="brown",outdir=outdir)
 eval_df(None,df,dataset_name="naturalstories", outdir=outdir)
+
+
+
 
 exit()
 
