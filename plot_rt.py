@@ -5,8 +5,9 @@ import matplotlib.pyplot as plt
 
 plt.show()
 final_df = pd.DataFrame(columns=["measure", "value"])
-metric=sys.argv[1]
-for f in sys.argv[2:]:
+metric="metric and len"
+target="logTotalRT"
+for f in sys.argv[1:]:
     df = pd.read_csv(f)
     power=int(df["measure"][0].replace("SL_", "").replace("_times_len", "").replace("slor_", "").replace("normlp_", ""))
     print(power)

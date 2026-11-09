@@ -3,7 +3,7 @@ import sys
 # load the  and compute the metric for each line
 import pandas as pd
 
-
+SKIP_FIRST=False
 def kl_divergence(surp,*args):
     n=len(surp)
     surp_normalized = surp / np.sum(surp)
@@ -48,7 +48,7 @@ def compute_metrics(surps, fn, sentences=None, unigram_log_probs=None):
     out = []
     lens = []
     f=flist[fnames.index(fn)]
-    print(surps, file=sys.stderr)
+    #print(surps, file=sys.stderr)
     for sent_surp,unigram_log_prob, sent in zip(surps, unigram_log_probs, sentences):
         if "unigram" in fn.lower():
             fval = f(np.asarray(unigram_log_prob),sent)
@@ -65,7 +65,10 @@ def compute_metrics(surps, fn, sentences=None, unigram_log_probs=None):
     return out
 
 
-
+m=sys.argv[1]
+surps=[]
 for line in sys.stdin:
-    surps= np.asarray([float(x) for x in line.strip().split(",")])
-    print(surps)
+    surps.append([float(x) for x in line.strip().split(",")])
+scores=compute_metrics(surps, m)
+for sent in scores:
+    print(sent)

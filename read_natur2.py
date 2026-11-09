@@ -1387,7 +1387,7 @@ if parser.parse_args().cola:
     # unigram_log_probs_dev=[string_to_uni_log_probs(s) for s in sents_cola_dev]
     # df_cola_dev=compute_metrics(surps_cola_dev, unigram_log_probs_dev, df_cola_dev, sents_cola_dev)
     # print(df_cola_dev)
-
+    df_cola.to_csv(f'{outdir}/out_cola.tsv', sep='\t')
     eval_cola(df_cola, dev=None, dataset_name="cola", outdir=outdir)
 
     surps = []
@@ -1398,6 +1398,7 @@ if parser.parse_args().cola:
     # for s in sents_cola_dev:
     #    surps_dev.append(score_gpt(s, model, tokenizer)[0])
     # df_cola_dev=compute_metrics(surps_dev,df_cola_dev, sents_cola_dev)
+    df_cola.to_csv(f'{outdir}/out_cola2.tsv', sep='\t')
     eval_cola(df_cola, dev=None, dataset_name="cola2", outdir=outdir)
 
 df_brown=read_brown()
